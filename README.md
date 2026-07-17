@@ -1,7 +1,7 @@
-# Krispy Kreme ParqueSur — Reseñas Analytics
+# Krispy Track — Analítica de reseñas de Google Maps
 
 Plataforma para extraer, analizar y visualizar las reseñas de Google Maps de
-Krispy Kreme ParqueSur.
+varias tiendas Krispy Kreme (ver `scraper/stores.py` para el listado actual).
 
 ## Estructura
 
@@ -23,7 +23,8 @@ proyecto-krispy-analytics/
 │   ├── css/styles.css
 │   └── js/{filters,analytics,dashboard}.js
 ├── krispy_kreme.db          # Se genera al correr el scraper
-└── krispy_kreme_todas_resenas.{json,csv}
+├── requirements.txt
+└── .replit                  # Config de despliegue (Replit)
 ```
 
 ## 1. Extraer las reseñas
@@ -67,15 +68,24 @@ para el scroll en cuanto encuentra 15 reseñas seguidas que ya están en la BD
 tienda con pocas reseñas nuevas desde la última vez, esto tarda segundos en
 vez de los 15-60+ minutos de un scrape completo.
 
-## 2. Levantar la API
+## 2. Levantar la app (API + dashboard, un solo proceso)
 
 ```bash
-cd backend
-pip install fastapi uvicorn openpyxl
-python main.py
+pip install -r requirements.txt
+python backend/main.py
 ```
 
-Sirve en `http://127.0.0.1:8000`. La mayoría de endpoints aceptan los mismos
+Sirve todo en `http://127.0.0.1:8000` — el backend monta el frontend estático
+en `/`, así que un único proceso basta tanto en local como al desplegar (ver
+`.replit`). También puede lanzarse con `uvicorn backend.main:app --host
+0.0.0.0 --port 8000`.
+
+- `POST /api/scrape` / `GET /api/scrape/status` — lanza y consulta el botón
+  "Actualizar" del dashboard (modo `--update` incremental por tienda o para
+  todas). Además hay un scheduler interno que repite esta actualización todas
+  las noches a las 02:00 mientras el proceso siga vivo.
+
+La mayoría de endpoints de lectura aceptan los mismos
 filtros `tienda`, `rating`, `sentiment`, `date_from`, `date_to`, `q` — así que
 las estadísticas, gráficos y exportaciones siempre reflejan lo que esté
 filtrado en el dashboard, no el total global:
@@ -90,18 +100,14 @@ filtrado en el dashboard, no el total global:
 - `GET /api/reviews/export` — CSV con los mismos filtros
 - `GET /api/reviews/export/xlsx` — Excel (.xlsx) con los mismos filtros
 
-## 3. Abrir el dashboard
+## 3. Desplegar (Replit u otro hosting)
 
-El frontend hace `fetch` a `http://127.0.0.1:8000`, así que necesita
-servirse por HTTP (no `file://`, los navegadores bloquean el `fetch` desde
-disco):
-
-```bash
-cd frontend
-python -m http.server 8080
-```
-
-Y abrir `http://127.0.0.1:8080`.
+El repo incluye `.replit` y `requirements.txt` listos para un despliegue
+directo: el comando de arranque es `python -m uvicorn backend.main:app
+--host 0.0.0.0 --port $PORT`. Solo se despliega el dashboard de
+lectura (la base de datos ya scrapeada); el scraping con Selenium necesita un
+Chrome real y sigue corriendo en local — sube `krispy_kreme.db` actualizada
+al repo de vez en cuando para refrescar los datos del sitio desplegado.
 
 ## Notas sobre el análisis de sentimiento
 
