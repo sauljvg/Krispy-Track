@@ -1,0 +1,469 @@
+function temaActual() {
+  return document.documentElement.dataset.theme
+    || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+}
+
+function aplicarTema(tema) {
+  document.documentElement.dataset.theme = tema;
+  localStorage.setItem("kt-theme", tema);
+  document.getElementById("btn-theme-toggle").textContent = tema === "dark" ? "☀️" : "🌙";
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Error ${res.status} al llamar ${url}`);
+  return res.json();
+}
+
+function escapeHTML(str) {
+  const div = document.createElement("div");
+  div.textContent = str ?? "";
+  return div.innerHTML;
+}
+
+async function loadStores() {
+  const { stores } = await fetchJSON(`${API_BASE}/stores`);
+  const select = document.getElementById("filter-tienda");
+  const current = select.value;
+  select.innerHTML = `<option value="">Todas</option>` +
+    stores.map((s) => `<option value="${escapeHTML(s.tienda)}">${escapeHTML(s.tienda)} (${s.total})</option>`).join("");
+  select.value = current;
+}
+
+function currentTransactionsMonth() {
+  const input = document.getElementById("input-transactions-month");
+  return input.value || new Date().toISOString().slice(0, 7);
+}
+
+function storeRankingRowHTML(s, mesValores) {
+  const tasa = s.tasa === null || s.tasa === undefined ? "—" : `${s.tasa}%`;
+  const mesValor = mesValores[s.tienda];
+  return `
+    <tr data-tienda="${escapeHTML(s.tienda)}">
+      <td>${escapeHTML(s.tienda)}</td>
+      <td>${s.total.toLocaleString("es-ES")}</td>
+      <td>
+        <input type="number" min="0" class="transacciones-input"
+               value="${mesValor ?? ""}" placeholder="—" data-tienda="${escapeHTML(s.tienda)}">
+      </td>
+      <td>${tasa}</td>
+    </tr>
+  `;
+}
+
+function avgRatingRowHTML(s) {
+  return `
+    <tr>
+      <td>${escapeHTML(s.tienda)}</td>
+      <td>${s.promedio} ★</td>
+    </tr>
+  `;
+}
+
+async function loadStoreRanking() {
+  const mes = currentTransactionsMonth();
+  // Ranking por transacciones: reseñas y tasa acotadas AL MES seleccionado
+  // (igual que ya hacían las transacciones). El de valoración media usa el
+  // acumulado histórico (stores sin `mes`), ya que no tiene sentido acotarlo.
+  const [{ stores: storesMes }, { stores: storesTotal }, { transacciones: mesValores }] = await Promise.all([
+    fetchJSON(`${API_BASE}/stores?order_by=tasa&mes=${encodeURIComponent(mes)}`),
+    fetchJSON(`${API_BASE}/stores`),
+    fetchJSON(`${API_BASE}/transactions?mes=${encodeURIComponent(mes)}`),
+  ]);
+  document.getElementById("store-ranking-list").innerHTML =
+    storesMes.map((s) => storeRankingRowHTML(s, mesValores)).join("") || `<tr><td colspan="4">Sin tiendas todavía.</td></tr>`;
+
+  const byRating = [...storesTotal].sort((a, b) => b.promedio - a.promedio);
+  document.getElementById("avg-rating-list").innerHTML =
+    byRating.map(avgRatingRowHTML).join("") || `<tr><td colspan="2">Sin tiendas todavía.</td></tr>`;
+}
+
+async function saveTransacciones(tienda, transacciones) {
+  const mes = currentTransactionsMonth();
+  await fetch(`${API_BASE}/transactions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tienda, mes, transacciones }),
+  });
+  await loadStoreRanking();
+}
+
+async function uploadTransaccionesFile(file) {
+  const mes = currentTransactionsMonth();
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_BASE}/transactions/upload?mes=${encodeURIComponent(mes)}`, { method: "POST", body: formData });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(`No se pudo procesar el Excel: ${body.detail || res.statusText}`);
+    return;
+  }
+  await loadStoreRanking();
+}
+
+async function loadStats() {
+  const params = currentQueryParams();
+  const stats = await fetchJSON(`${API_BASE}/stats?${params.toString()}`);
+  document.getElementById("stat-total").textContent = stats.total.toLocaleString("es-ES");
+  document.getElementById("stat-promedio").textContent = `${stats.promedio_estrellas} ★`;
+  document.getElementById("stat-positivas").textContent = `${stats.porcentaje_positivas}%`;
+  document.getElementById("stat-recientes").textContent = stats.resenas_recientes.toLocaleString("es-ES");
+  renderDistributionChart(stats.distribucion_estrellas);
+
+  const checkEl = document.getElementById("stat-total-check");
+  if (stats.completo) {
+    checkEl.hidden = false;
+    checkEl.title = `100% capturado (${stats.total.toLocaleString("es-ES")} de ${stats.total_google.toLocaleString("es-ES")} según Google)`;
+  } else {
+    checkEl.hidden = true;
+  }
+}
+
+function renderRatingProgress(p) {
+  document.getElementById("rating-true-value").textContent = p.true_rating ? p.true_rating.toFixed(3) : "—";
+
+  const hintEl = document.getElementById("rating-need-hint");
+  if (p.resenas_necesarias > 0) {
+    hintEl.innerHTML = `Se necesitan <b>${p.resenas_necesarias.toLocaleString("es-ES")}</b> reseñas de 5★ seguidas para llegar a ${p.tier_siguiente.toFixed(1)} estrellas.`;
+  } else if (p.true_rating) {
+    hintEl.textContent = "Ya está en el nivel máximo visible.";
+  } else {
+    hintEl.textContent = "";
+  }
+
+  document.getElementById("rating-tier-low").textContent = p.tier_actual ? p.tier_actual.toFixed(1) : "—";
+  document.getElementById("rating-tier-mid").textContent = p.true_rating ? p.true_rating.toFixed(3) : "—";
+  document.getElementById("rating-tier-high").textContent = p.tier_siguiente ? p.tier_siguiente.toFixed(1) : "—";
+
+  document.getElementById("rating-progress-fill").style.width = `${p.progreso_pct || 0}%`;
+  document.getElementById("rating-progress-pct").textContent = p.true_rating ? `${p.progreso_pct}%` : "—";
+
+  const trendEl = document.getElementById("rating-trend");
+  if (p.tendencia_90d === null || p.tendencia_90d === undefined) {
+    trendEl.textContent = "";
+  } else {
+    const sign = p.tendencia_90d > 0 ? "+" : "";
+    const cls = p.tendencia_90d > 0 ? "rating-trend-up" : p.tendencia_90d < 0 ? "rating-trend-down" : "";
+    trendEl.innerHTML = `90 días: ${p.true_rating_90d.toFixed(3)} → <span class="${cls}">${sign}${p.tendencia_90d.toFixed(3)}</span>`;
+  }
+}
+
+async function loadRatingProgress() {
+  const params = currentQueryParams();
+  const progress = await fetchJSON(`${API_BASE}/rating-progress?${params.toString()}`);
+  renderRatingProgress(progress);
+}
+
+async function loadTimeline() {
+  const params = currentQueryParams();
+  const { timeline } = await fetchJSON(`${API_BASE}/timeline?${params.toString()}`);
+  renderTimelineChart(timeline);
+}
+
+async function loadKeywords() {
+  const params = currentQueryParams({ limit: 20 });
+  const { keywords } = await fetchJSON(`${API_BASE}/keywords?${params.toString()}`);
+  renderKeywords(keywords);
+}
+
+function staffRowHTML(s) {
+  const active = state.staff === s.nombre && (!state.tienda || state.tienda === s.tienda) ? "active" : "";
+  return `
+    <tr class="${active}" data-name="${escapeHTML(s.nombre)}" data-tienda="${escapeHTML(s.tienda)}">
+      <td>${escapeHTML(s.nombre)}</td>
+      <td>${escapeHTML(s.tienda)}</td>
+      <td>${s.menciones}</td>
+      <td>${s.promedio_estrellas} ★</td>
+      <td>${s.porcentaje_positivas}%</td>
+    </tr>
+  `;
+}
+
+async function loadStaffMentions() {
+  const hintEl = document.getElementById("staff-select-hint");
+  hintEl.hidden = !!state.tienda;
+
+  // El ranking en sí NUNCA se filtra por empleado (si no, al hacer clic en
+  // uno desaparecerían los demás); solo por tienda/estrellas/sentimiento/fecha/buscar.
+  const params = currentQueryParams();
+  params.delete("staff");
+  const { actuales, anteriores } = await fetchJSON(`${API_BASE}/staff-mentions?${params.toString()}`);
+
+  document.getElementById("staff-list").innerHTML =
+    actuales.map(staffRowHTML).join("") || `<tr><td colspan="5">Sin menciones para estos filtros.</td></tr>`;
+  document.getElementById("staff-former-list").innerHTML =
+    anteriores.map(staffRowHTML).join("") || `<tr><td colspan="5">Sin menciones para estos filtros.</td></tr>`;
+
+  const activeEl = document.getElementById("staff-active-filter");
+  document.getElementById("staff-active-name").textContent = state.staff;
+  activeEl.hidden = !state.staff;
+}
+
+function selectStaff(name, tienda) {
+  const mismaPersona = state.staff === name && (!state.tienda || state.tienda === tienda);
+  if (mismaPersona) {
+    state.staff = "";
+  } else {
+    state.staff = name;
+    // En modo "Todas", seleccionar a alguien acota también a su tienda —
+    // si no, el filtro de reseñas no sabría a qué plantilla pertenece ese
+    // nombre (el mismo nombre de pila puede ser otra persona en otro local).
+    if (tienda && state.tienda !== tienda) {
+      state.tienda = tienda;
+      document.getElementById("filter-tienda").value = tienda;
+    }
+  }
+  state.page = 1;
+  return refreshAll();
+}
+
+function clearStaffFilter() {
+  state.staff = "";
+  state.page = 1;
+  return refreshAll();
+}
+
+function reviewCardHTML(r) {
+  const stars = r.calificacion_num ? "★".repeat(r.calificacion_num) + "☆".repeat(5 - r.calificacion_num) : "—";
+  return `
+    <div class="review-item">
+      <div class="review-top">
+        <span class="review-author">${escapeHTML(r.autor || "Anónimo")}</span>
+        <span class="review-meta">
+          <span class="review-stars">${stars}</span>
+          <span>${escapeHTML(r.fecha_categoria || "")}</span>
+          <span class="badge badge-${r.sentiment}">${r.sentiment}</span>
+        </span>
+      </div>
+      <div class="review-text">${r.texto ? escapeHTML(r.texto) : '<i>Sin comentario, solo calificación.</i>'}</div>
+    </div>
+  `;
+}
+
+function renderPagination(total, totalPaginas) {
+  const el = document.getElementById("pagination");
+  document.getElementById("reviews-count").textContent = `${total.toLocaleString("es-ES")} resultados`;
+
+  if (totalPaginas <= 1) { el.innerHTML = ""; return; }
+
+  const current = state.page;
+  const pages = [];
+  const add = (p) => { if (!pages.includes(p) && p >= 1 && p <= totalPaginas) pages.push(p); };
+  add(1); add(current - 1); add(current); add(current + 1); add(totalPaginas);
+  pages.sort((a, b) => a - b);
+
+  let html = `<button ${current === 1 ? "disabled" : ""} data-page="${current - 1}">‹</button>`;
+  let prev = 0;
+  for (const p of pages) {
+    if (prev && p - prev > 1) html += `<span>…</span>`;
+    html += `<button class="${p === current ? "active" : ""}" data-page="${p}">${p}</button>`;
+    prev = p;
+  }
+  html += `<button ${current === totalPaginas ? "disabled" : ""} data-page="${current + 1}">›</button>`;
+  el.innerHTML = html;
+
+  el.querySelectorAll("button[data-page]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.page = parseInt(btn.dataset.page, 10);
+      loadReviews();
+      window.scrollTo({ top: document.getElementById("filters-row").offsetTop - 20, behavior: "smooth" });
+    });
+  });
+}
+
+async function loadReviews() {
+  const params = currentQueryParams({ page: state.page, page_size: state.pageSize, sort: state.sort });
+  const data = await fetchJSON(`${API_BASE}/reviews?${params.toString()}`);
+  document.getElementById("reviews-list").innerHTML = data.reviews.map(reviewCardHTML).join("") || "<p>No hay reseñas para estos filtros.</p>";
+  renderPagination(data.total, data.total_paginas);
+}
+
+async function refreshAll() {
+  const tasks = [
+    ["stats", loadStats()],
+    ["rating-progress", loadRatingProgress()],
+    ["timeline", loadTimeline()],
+    ["keywords", loadKeywords()],
+    ["staff", loadStaffMentions()],
+    ["reviews", loadReviews()],
+  ];
+  const results = await Promise.allSettled(tasks.map(([, p]) => p));
+  results.forEach((r, i) => {
+    if (r.status === "rejected") console.error(`Fallo cargando ${tasks[i][0]}:`, r.reason);
+  });
+  if (results.every((r) => r.status === "rejected")) {
+    throw results[0].reason;
+  }
+}
+
+function exportExcel() {
+  const params = currentQueryParams();
+  window.open(`${API_BASE}/reviews/export/xlsx?${params.toString()}`, "_blank");
+}
+
+function goToLatest() {
+  state.page = 1;
+  state.sort = "recientes";
+  const sortEl = document.getElementById("filter-sort");
+  if (sortEl) sortEl.value = "recientes";
+  return refreshAll();
+}
+
+let scrapePollTimer = null;
+
+async function startScrapeUpdate() {
+  const tienda = state.tienda;
+  const url = tienda ? `${API_BASE}/scrape?tienda=${encodeURIComponent(tienda)}` : `${API_BASE}/scrape`;
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert(`No se pudo iniciar la actualización: ${body.detail || res.statusText}`);
+    return;
+  }
+  pollScrapeStatus(tienda);
+}
+
+function renderScrapeTooltip(e) {
+  const tooltipEl = document.getElementById("scrape-info-tooltip");
+  if (!e) {
+    tooltipEl.textContent = "Esperando datos…";
+    return;
+  }
+  const totalGoogle = e.total_google != null ? e.total_google.toLocaleString("es-ES") : "desconocido";
+  const visibles = e.reviews_visibles != null ? e.reviews_visibles.toLocaleString("es-ES") : "—";
+  const lines = [
+    `<b>Tienda:</b> ${escapeHTML(e.tienda || "")}`,
+    `<b>Total en Google:</b> ${totalGoogle}`,
+    `<b>Encontradas ahora:</b> ${visibles}`,
+  ];
+  if (e.nuevas != null) lines.push(`<b>Nuevas (no vistas antes):</b> ${e.nuevas}`);
+  if (e.ya_conocidas != null) lines.push(`<b>Ya conocidas:</b> ${e.ya_conocidas.toLocaleString("es-ES")}`);
+  tooltipEl.innerHTML = lines.join("<br>");
+}
+
+async function pollScrapeStatusTick(tienda, progressEl, msgEl, btn) {
+  try {
+    const url = tienda
+      ? `${API_BASE}/scrape/status?tienda=${encodeURIComponent(tienda)}`
+      : `${API_BASE}/scrape/status`;
+    const { tiendas } = await fetchJSON(url);
+    const entries = Object.values(tiendas);
+    const running = entries.filter((e) => e.status === "running" || e.en_ejecucion);
+    const errored = entries.filter((e) => e.status === "error");
+
+    if (running.length) {
+      const e = running[0];
+      const nuevas = e.nuevas != null ? ` (${e.nuevas} nuevas)` : "";
+      msgEl.textContent = `${e.tienda || ""}: ${e.mensaje || "actualizando…"}${nuevas}`;
+      renderScrapeTooltip(e);
+      return;
+    }
+
+    clearInterval(scrapePollTimer);
+    scrapePollTimer = null;
+    progressEl.hidden = true;
+    btn.disabled = false;
+    msgEl.textContent = "";
+    renderScrapeTooltip(null);
+    if (errored.length) {
+      alert(`Error actualizando ${errored.map((e) => e.tienda).join(", ")}: ${errored[0].mensaje}`);
+    }
+    await loadStores();
+    await loadStoreRanking();
+    await goToLatest();
+  } catch (err) {
+    console.error("Fallo consultando estado de scraping:", err);
+  }
+}
+
+function pollScrapeStatus(tienda) {
+  const progressEl = document.getElementById("scrape-progress");
+  const msgEl = document.getElementById("scrape-progress-msg");
+  const btn = document.getElementById("btn-refresh");
+  progressEl.hidden = false;
+  btn.disabled = true;
+  renderScrapeTooltip(null);
+
+  if (scrapePollTimer) clearInterval(scrapePollTimer);
+  // Primer sondeo inmediato (setInterval no dispara hasta pasado el primer
+  // intervalo, así que sin esto el tooltip se queda en "Esperando datos…"
+  // varios segundos aunque el scraper ya esté avanzando).
+  pollScrapeStatusTick(tienda, progressEl, msgEl, btn);
+  scrapePollTimer = setInterval(() => pollScrapeStatusTick(tienda, progressEl, msgEl, btn), 3000);
+}
+
+function clearFilters() {
+  document.getElementById("filter-tienda").value = "";
+  document.getElementById("filter-rating").value = "";
+  document.getElementById("filter-sentiment").value = "";
+  document.getElementById("filter-date-from").value = "";
+  document.getElementById("filter-date-to").value = "";
+  document.getElementById("filter-search").value = "";
+  document.getElementById("filter-sort").value = "recientes";
+
+  state.page = 1;
+  state.tienda = "";
+  state.rating = "";
+  state.sentiment = "";
+  state.dateFrom = "";
+  state.dateTo = "";
+  state.q = "";
+  state.staff = "";
+  state.sort = "recientes";
+
+  return refreshAll();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  aplicarTema(temaActual());
+  document.getElementById("btn-theme-toggle").addEventListener("click", () => {
+    aplicarTema(temaActual() === "dark" ? "light" : "dark");
+  });
+
+  wireFilters(() => refreshAll(), () => loadReviews());
+  document.getElementById("btn-refresh").addEventListener("click", startScrapeUpdate);
+  document.getElementById("btn-export-csv").addEventListener("click", exportExcel);
+  document.getElementById("input-transactions-month").value = new Date().toISOString().slice(0, 7);
+  document.getElementById("input-transactions-month").addEventListener("change", () => {
+    loadStoreRanking().catch((err) => console.error("Fallo recargando ranking de tiendas:", err));
+  });
+  document.getElementById("btn-clear-filters").addEventListener("click", clearFilters);
+  document.getElementById("btn-clear-staff").addEventListener("click", clearStaffFilter);
+
+  const onStaffRowClick = (e) => {
+    const row = e.target.closest("tr[data-name]");
+    if (row) selectStaff(row.dataset.name, row.dataset.tienda);
+  };
+  document.getElementById("staff-list").addEventListener("click", onStaffRowClick);
+  document.getElementById("staff-former-list").addEventListener("click", onStaffRowClick);
+
+  document.getElementById("btn-toggle-former").addEventListener("click", (e) => {
+    const table = document.getElementById("staff-former-table");
+    table.hidden = !table.hidden;
+    e.target.textContent = table.hidden ? "Mostrar anteriores" : "Ocultar anteriores";
+  });
+
+  loadStores().catch((err) => console.error("Fallo cargando tiendas:", err));
+  loadStoreRanking().catch((err) => console.error("Fallo cargando ranking de tiendas:", err));
+
+  document.getElementById("store-ranking-list").addEventListener("change", (e) => {
+    const input = e.target.closest(".transacciones-input");
+    if (!input) return;
+    const value = parseInt(input.value, 10);
+    if (Number.isNaN(value) || value < 0) return;
+    saveTransacciones(input.dataset.tienda, value).catch((err) => console.error("Fallo guardando transacciones:", err));
+  });
+
+  document.getElementById("input-transactions-upload").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    uploadTransaccionesFile(file).catch((err) => console.error("Fallo subiendo Excel:", err));
+    e.target.value = "";
+  });
+
+  refreshAll().catch((err) => {
+    console.error(err);
+    document.getElementById("reviews-list").innerHTML =
+      `<p>No se pudo conectar con la API (${escapeHTML(err.message)}). ¿Está corriendo <code>python main.py</code> en /backend?</p>`;
+  });
+});

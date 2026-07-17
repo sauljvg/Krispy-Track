@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.log
+scraper/status/*.lock
+krispy_kreme_todas_resenas.json
+krispy_kreme_todas_resenas.csv

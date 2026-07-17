@@ -1,0 +1,310 @@
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi.responses import PlainTextResponse, Response
+from pydantic import BaseModel, Field
+
+import analytics
+import scrape_jobs
+from db import dict_rows, get_connection
+from utils import paginate, read_transactions_xlsx, rows_to_csv, rows_to_xlsx
+
+router = APIRouter()
+
+
+def build_filters(rating, sentiment, date_from, date_to, q, staff=None, tienda=None):
+    clauses = []
+    params = []
+
+    if tienda:
+        clauses.append("tienda = ?")
+        params.append(tienda)
+    if rating is not None:
+        clauses.append("calificacion_num = ?")
+        params.append(rating)
+    if sentiment:
+        clauses.append("sentiment = ?")
+        params.append(sentiment)
+    if date_from:
+        clauses.append("fecha_datetime >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("fecha_datetime <= ?")
+        params.append(date_to)
+    if q:
+        clauses.append("(texto LIKE ? OR autor LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like])
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    if staff:
+        # El filtro por empleado usa coincidencia de palabra completa sobre
+        # el TEXTO (nunca el autor), igual que el ranking de "Personal
+        # mencionado" — así los números siempre coinciden. Requiere tienda
+        # porque el mismo nombre puede ser una persona distinta en cada local;
+        # sin tienda no hay forma de saber a qué plantilla pertenece.
+        ids = analytics.staff_matching_review_ids(tienda, staff, where, params) if tienda else []
+        if ids:
+            placeholders = ",".join(["?"] * len(ids))
+            clauses.append(f"review_id IN ({placeholders})")
+            params.extend(ids)
+        else:
+            clauses.append("1=0")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    return where, params
+
+
+@router.get("/reviews")
+def list_reviews(
+    page: int = 1,
+    page_size: int = 20,
+    rating: int | None = None,
+    sentiment: str | None = Query(default=None, pattern="^(positivo|neutral|negativo)$"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    staff: str | None = None,
+    tienda: str | None = None,
+    sort: str = Query(default="recientes", pattern="^(recientes|antiguas|mejor|peor)$"),
+):
+    page, page_size, offset = paginate(page, page_size)
+    where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+
+    order_by = {
+        "recientes": "fecha_datetime DESC",
+        "antiguas": "fecha_datetime ASC",
+        "mejor": "calificacion_num DESC",
+        "peor": "calificacion_num ASC",
+    }[sort]
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f"SELECT COUNT(*) AS total FROM reviews {where}", params)
+    total = cur.fetchone()["total"]
+
+    cur.execute(
+        f"""
+        SELECT review_id, tienda, autor, fecha, fecha_datetime, fecha_categoria,
+               calificacion, calificacion_num, texto, es_reciente, sentiment, sentiment_score
+        FROM reviews {where}
+        ORDER BY {order_by}
+        LIMIT ? OFFSET ?
+        """,
+        params + [page_size, offset],
+    )
+    reviews = dict_rows(cur)
+    conn.close()
+
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_paginas": (total + page_size - 1) // page_size if page_size else 0,
+        "reviews": reviews,
+    }
+
+
+def _filtered_rows(rating, sentiment, date_from, date_to, q, staff=None, tienda=None):
+    where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f"SELECT * FROM reviews {where} ORDER BY fecha_datetime DESC", params)
+    rows = dict_rows(cur)
+    conn.close()
+    return rows
+
+
+@router.get("/reviews/export")
+def export_reviews_csv(
+    rating: int | None = None,
+    sentiment: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    staff: str | None = None,
+    tienda: str | None = None,
+):
+    rows = _filtered_rows(rating, sentiment, date_from, date_to, q, staff, tienda)
+    csv_text = rows_to_csv(rows)
+    return PlainTextResponse(
+        csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=krispy_kreme_reviews.csv"},
+    )
+
+
+@router.get("/reviews/export/xlsx")
+def export_reviews_xlsx(
+    rating: int | None = None,
+    sentiment: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    staff: str | None = None,
+    tienda: str | None = None,
+):
+    rows = _filtered_rows(rating, sentiment, date_from, date_to, q, staff, tienda)
+    xlsx_bytes = rows_to_xlsx(rows)
+    return Response(
+        xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=krispy_kreme_reviews.xlsx"},
+    )
+
+
+@router.get("/stats")
+def stats(
+    rating: int | None = None,
+    sentiment: str | None = Query(default=None, pattern="^(positivo|neutral|negativo)$"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    staff: str | None = None,
+    tienda: str | None = None,
+):
+    where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+    result = analytics.get_stats(where, params)
+    total_google = analytics.get_store_total_google(tienda) if tienda else None
+    result["total_google"] = total_google
+    result["completo"] = bool(total_google and result["total"] >= total_google)
+    return result
+
+
+@router.get("/rating-progress")
+def rating_progress(
+    rating: int | None = None,
+    sentiment: str | None = Query(default=None, pattern="^(positivo|neutral|negativo)$"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    staff: str | None = None,
+    tienda: str | None = None,
+):
+    where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+    return analytics.get_rating_progress(where, params)
+
+
+@router.get("/timeline")
+def timeline(
+    rating: int | None = None,
+    sentiment: str | None = Query(default=None, pattern="^(positivo|neutral|negativo)$"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    staff: str | None = None,
+    tienda: str | None = None,
+):
+    where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+    return {"timeline": analytics.get_timeline(where, params)}
+
+
+@router.get("/keywords")
+def keywords(
+    limit: int = 20,
+    rating: int | None = None,
+    sentiment: str | None = Query(default=None, pattern="^(positivo|neutral|negativo)$"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    staff: str | None = None,
+    tienda: str | None = None,
+):
+    where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+    return {"keywords": analytics.get_keywords(limit, where, params)}
+
+
+@router.get("/staff-mentions")
+def staff_mentions(
+    rating: int | None = None,
+    sentiment: str | None = Query(default=None, pattern="^(positivo|neutral|negativo)$"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    tienda: str | None = None,
+):
+    # Nota: no acepta `staff` — esta es la lista base que alimenta los clics
+    # del ranking; filtrarla por staff sería circular.
+    # El ranking de personal solo tiene sentido POR TIENDA (el mismo nombre de
+    # pila puede ser una persona distinta en cada local). Con una tienda
+    # seleccionada se cuenta solo ahí; con "Todas" se cuenta cada una POR SU
+    # PROPIA tienda por separado (nunca mezcladas) y se etiqueta cada fila.
+    where, params = build_filters(rating, sentiment, date_from, date_to, q, tienda=tienda)
+    if tienda:
+        return analytics.get_staff_mentions(tienda, where, params)
+    return analytics.get_staff_mentions_all_stores(where, params)
+
+
+@router.get("/stores")
+def stores(
+    order_by: str = Query(default="total", pattern="^(total|tasa)$"),
+    mes: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+):
+    """Tiendas presentes en la BD con su nº de reseñas — alimenta el selector
+    de tienda y el ranking comparativo entre locales (`order_by=tasa` para
+    ordenar por reseñas/transacciones). Con `mes` (YYYY-MM), tanto las
+    reseñas como las transacciones se acotan a ese mes en vez de mostrar el
+    acumulado histórico."""
+    return {"stores": analytics.get_store_stats(order_by, mes)}
+
+
+MES_PATTERN = r"^\d{4}-\d{2}$"
+
+
+@router.get("/transactions")
+def get_transactions(mes: str = Query(pattern=MES_PATTERN)):
+    """Transacciones cargadas para un mes concreto, por tienda — alimenta los
+    inputs editables del ranking al cambiar de mes."""
+    return {"mes": mes, "transacciones": analytics.get_month_transactions(mes)}
+
+
+class TransactionsIn(BaseModel):
+    tienda: str
+    mes: str = Field(pattern=MES_PATTERN)
+    transacciones: int
+
+
+@router.post("/transactions")
+def set_transactions(body: TransactionsIn):
+    if body.transacciones < 0:
+        raise HTTPException(400, "transacciones no puede ser negativo")
+    analytics.set_store_transactions(body.tienda, body.mes, body.transacciones)
+    return {"ok": True}
+
+
+@router.post("/scrape")
+def start_scrape(tienda: str | None = None):
+    """Lanza scraper_v2.py --update para `tienda` (nombre público o clave), o
+    para las 6 tiendas en cola si no se especifica. No bloquea: el progreso
+    se consulta en /scrape/status."""
+    if tienda:
+        key = scrape_jobs.resolve_tienda_key(tienda)
+        if key is None:
+            raise HTTPException(404, f"Tienda desconocida: '{tienda}'")
+        ok, error = scrape_jobs.start_update(tienda_key=key, all_keys=scrape_jobs.all_tienda_keys())
+    else:
+        ok, error = scrape_jobs.start_update(all_keys=scrape_jobs.all_tienda_keys())
+    if not ok:
+        raise HTTPException(409, error)
+    return {"ok": True}
+
+
+@router.get("/scrape/status")
+def scrape_status(tienda: str | None = None):
+    """Estado de la actualización en curso (o de la última). Sin `tienda`
+    devuelve el estado de todas las tiendas."""
+    keys = [scrape_jobs.resolve_tienda_key(tienda)] if tienda else scrape_jobs.all_tienda_keys()
+    if tienda and keys[0] is None:
+        raise HTTPException(404, f"Tienda desconocida: '{tienda}'")
+    return {"tiendas": {key: scrape_jobs.read_status(key) for key in keys}}
+
+
+@router.post("/transactions/upload")
+def upload_transactions(file: UploadFile = File(...), mes: str | None = Query(default=None, pattern=MES_PATTERN)):
+    try:
+        rows = read_transactions_xlsx(file.file.read(), default_mes=mes)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not rows:
+        raise HTTPException(400, "No se encontraron filas válidas (columnas esperadas: tienda, mes, transacciones)")
+    analytics.bulk_set_store_transactions(rows)
+    return {"ok": True, "actualizadas": len(rows)}
