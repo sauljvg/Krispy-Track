@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Importa reseñas desde un export de Google Takeout ("Perfil de Empresa en
+Google"), que trae el histórico completo y oficial de cada ubicación sin
+pasar por Selenium/scroll — Takeout no sufre el bloqueo de automatización
+que sí afecta al scraping de Maps.
+
+Uso:
+    python import_takeout.py "C:\\ruta\\a\\la\\carpeta\\Takeout_extraida"
+
+La carpeta debe contener "Takeout/Perfil de Empresa en Google/account-*/".
+"""
+import glob
+import json
+import os
+import re
+import sqlite3
+import sys
+from datetime import datetime
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from common import calcular_sentimiento, fecha_categoria  # noqa: E402
+import config  # noqa: E402
+
+CURRENT_DATE = datetime.now()
+
+# IDs internos de ubicación de Google Business Profile -> nombre de tienda tal
+# como aparece en stores.py. Se identificaron cruzando el "storeCode" de cada
+# location/data.json con el código de tienda visible en el panel de gestión
+# de reseñas (business.google.com).
+LOCATION_TO_STORE = {
+    "location-10398817451723850297": "ParqueSur",
+    "location-12690726064070696692": "Princesa",
+    "location-10317049400463155537": "Plenilunio",
+    "location-12783565955788444310": "Caleido",
+    "location-5186930758782444873": "Gran Plaza 2",
+    "location-7326412347627659015": "La Gavia",
+}
+
+STAR_MAP = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
+
+
+def longpath(p):
+    """Windows corta en 260 caracteres; los nombres de archivo de Takeout
+    (el ID completo de la reseña) los superan fácilmente combinados con
+    rutas ya profundas. El prefijo \\\\?\\ hace que Windows use la API de
+    rutas largas sin límite práctico."""
+    p = os.path.abspath(p)
+    if not p.startswith("\\\\?\\"):
+        return "\\\\?\\" + p
+    return p
+
+
+def strip_translation(texto):
+    """Takeout adjunta la traducción automática al inglés tras el texto
+    original separada por '(Translated by Google)'; nos quedamos solo con
+    el texto original para no duplicar contenido ni desviar el análisis de
+    sentimiento (afinado en español)."""
+    if not texto:
+        return ""
+    marker = "(Translated by Google)"
+    if marker in texto:
+        texto = texto.split(marker)[0]
+    return texto.strip()
+
+
+def fecha_relativa_desde(fecha_dt):
+    dias = (CURRENT_DATE - fecha_dt).days
+    if dias <= 0:
+        return "Hoy"
+    if dias == 1:
+        return "Hace 1 día"
+    if dias < 30:
+        return f"Hace {dias} días"
+    meses = dias // 30
+    if meses < 12:
+        return f"Hace {meses} mes" if meses == 1 else f"Hace {meses} meses"
+    anos = dias // 365
+    return f"Hace {anos} año" if anos == 1 else f"Hace {anos} años"
+
+
+def load_location_reviews(location_dir):
+    """Consolida reviews.json + todos los reviews-<id>.json de una ubicación
+    (deduplicados por el campo 'name', que es el ID canónico de Google)."""
+    full_dir = longpath(location_dir)
+    entries = os.listdir(full_dir)
+    review_files = [e for e in entries if e.startswith("reviews") and e.endswith(".json")]
+    all_reviews = {}
+    for fname in review_files:
+        fpath = os.path.join(full_dir, fname)
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"  ! aviso: no se pudo leer {fname}: {e}", flush=True)
+            continue
+        revs = data.get("reviews", [data]) if isinstance(data, dict) else []
+        for r in revs:
+            rid = r.get("name")
+            if rid:
+                all_reviews[rid] = r
+    return list(all_reviews.values())
+
+
+def process_takeout_review(raw, tienda):
+    review_id = raw["name"].rsplit("/", 1)[-1]
+    rating = STAR_MAP.get(raw.get("starRating"))
+    texto = strip_translation(raw.get("comment", ""))
+
+    create_time = raw.get("createTime")
+    fecha_dt = None
+    if create_time:
+        try:
+            fecha_dt = datetime.strptime(create_time[:19], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            fecha_dt = None
+
+    sentiment, sentiment_score = calcular_sentimiento(texto, rating)
+    es_reciente = bool(fecha_dt and (CURRENT_DATE - fecha_dt).days <= 120)
+
+    return {
+        "review_id": review_id,
+        "tienda": tienda,
+        "autor": (raw.get("reviewer") or {}).get("displayName", "Usuario de Google").strip(),
+        "fecha": fecha_relativa_desde(fecha_dt) if fecha_dt else "",
+        "fecha_datetime": fecha_dt.strftime("%Y-%m-%d") if fecha_dt else None,
+        "fecha_categoria": fecha_categoria(fecha_dt),
+        "calificación": f"{rating}★" if rating else "No especificada",
+        "calificacion_num": rating,
+        "texto": texto,
+        "es_abril_o_reciente": es_reciente,
+        "sentiment": sentiment,
+        "sentiment_score": sentiment_score,
+    }
+
+
+def get_existing_ids(tienda):
+    if not os.path.exists(config.DB_PATH):
+        return set()
+    conn = sqlite3.connect(config.DB_PATH)
+    try:
+        cur = conn.execute("SELECT review_id FROM reviews WHERE tienda = ?", (tienda,))
+        return {row[0] for row in cur.fetchall()}
+    except sqlite3.OperationalError:
+        return set()
+    finally:
+        conn.close()
+
+
+def save_to_sqlite(reviews):
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            review_id TEXT PRIMARY KEY,
+            tienda TEXT,
+            autor TEXT,
+            fecha TEXT,
+            fecha_datetime TEXT,
+            fecha_categoria TEXT,
+            calificacion TEXT,
+            calificacion_num INTEGER,
+            texto TEXT,
+            es_reciente INTEGER,
+            sentiment TEXT,
+            sentiment_score REAL
+        )
+    """)
+    for r in reviews:
+        conn.execute("""
+            INSERT INTO reviews (
+                review_id, tienda, autor, fecha, fecha_datetime, fecha_categoria,
+                calificacion, calificacion_num, texto, es_reciente, sentiment, sentiment_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(review_id) DO UPDATE SET
+                tienda=excluded.tienda, autor=excluded.autor, fecha=excluded.fecha,
+                fecha_datetime=excluded.fecha_datetime, fecha_categoria=excluded.fecha_categoria,
+                calificacion=excluded.calificacion, calificacion_num=excluded.calificacion_num,
+                texto=excluded.texto, es_reciente=excluded.es_reciente, sentiment=excluded.sentiment,
+                sentiment_score=excluded.sentiment_score
+        """, (
+            r["review_id"], r["tienda"], r["autor"], r["fecha"], r["fecha_datetime"], r["fecha_categoria"],
+            r["calificación"], r["calificacion_num"], r["texto"], int(r["es_abril_o_reciente"]),
+            r["sentiment"], r["sentiment_score"],
+        ))
+    conn.commit()
+    conn.close()
+
+
+def get_total_google(tienda):
+    if not os.path.exists(config.DB_PATH):
+        return None
+    conn = sqlite3.connect(config.DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT total_google FROM store_meta WHERE tienda = ?", (tienda,)
+        ).fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+
+
+def find_account_dir(takeout_root):
+    pattern = os.path.join(takeout_root, "Takeout", "Perfil de Empresa en Google", "account-*")
+    matches = glob.glob(pattern)
+    if not matches:
+        raise SystemExit(
+            f"No se encontró 'Takeout/Perfil de Empresa en Google/account-*' dentro de {takeout_root}"
+        )
+    return matches[0]
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Uso: python import_takeout.py <carpeta_takeout_extraida>")
+        sys.exit(1)
+
+    account_dir = find_account_dir(sys.argv[1])
+    print(f"Cuenta de Takeout: {account_dir}\n")
+
+    report = []
+    for loc_dir_name, tienda in LOCATION_TO_STORE.items():
+        loc_path = os.path.join(account_dir, loc_dir_name)
+        if not os.path.isdir(loc_path):
+            print(f"! {tienda}: no se encontró la carpeta {loc_dir_name}, se omite")
+            continue
+
+        raw_reviews = load_location_reviews(loc_path)
+        existing_ids = get_existing_ids(tienda)
+        processed = [process_takeout_review(r, tienda) for r in raw_reviews]
+
+        nuevas = [p for p in processed if p["review_id"] not in existing_ids]
+        actualizadas = [p for p in processed if p["review_id"] in existing_ids]
+
+        save_to_sqlite(processed)
+
+        total_ahora = len(existing_ids | {p["review_id"] for p in processed})
+        total_google = get_total_google(tienda)
+        pct = f"{total_ahora * 100 // total_google}%" if total_google else "?"
+
+        report.append({
+            "tienda": tienda,
+            "en_takeout": len(processed),
+            "ya_teniamos": len(actualizadas),
+            "nuevas": len(nuevas),
+            "total_ahora": total_ahora,
+            "total_google": total_google,
+            "pct": pct,
+        })
+
+        print(f"{tienda}: {len(processed)} en Takeout | {len(nuevas)} nuevas | "
+              f"{len(actualizadas)} ya existían (actualizadas) | "
+              f"total ahora: {total_ahora}" + (f"/{total_google} ({pct})" if total_google else ""))
+
+    print("\n" + "=" * 70)
+    print("REPORTE FINAL — Import de Google Takeout")
+    print("=" * 70)
+    total_nuevas = sum(r["nuevas"] for r in report)
+    for r in report:
+        print(f"  {r['tienda']:<14} +{r['nuevas']:<5} nuevas  "
+              f"(total: {r['total_ahora']}" + (f"/{r['total_google']} = {r['pct']}" if r['total_google'] else "") + ")")
+    print(f"\nTotal de reseñas NUEVAS encontradas gracias a Takeout: {total_nuevas}")
+
+
+if __name__ == "__main__":
+    main()
