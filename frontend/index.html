@@ -157,6 +157,24 @@
       </div>
     </section>
 
+    <section class="chart-card">
+      <div class="reviews-header">
+        <h2>Horario de reseñas</h2>
+        <button id="btn-toggle-horario" class="btn btn-ghost">Mostrar</button>
+      </div>
+      <p id="horario-hint" class="staff-hint" hidden></p>
+      <div id="horario-charts" class="charts-row" hidden>
+        <div class="chart-card">
+          <h2>Por hora del día</h2>
+          <canvas id="chart-hora" height="220"></canvas>
+        </div>
+        <div class="chart-card">
+          <h2>Por día de la semana</h2>
+          <canvas id="chart-dia-semana" height="220"></canvas>
+        </div>
+      </div>
+    </section>
+
     <section class="keywords-card">
       <h2>Palabras más mencionadas</h2>
       <div id="keywords-list" class="keywords-list"></div>

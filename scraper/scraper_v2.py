@@ -703,6 +703,15 @@ def save_to_sqlite(reviews, db_path):
     except sqlite3.OperationalError:
         pass  # La columna ya existía
 
+    # Migración idempotente para hora exacta y respuesta del negocio — solo
+    # las rellena la importación de Google Takeout (import_takeout.py), el
+    # scraping de Maps no tiene esos datos, así que aquí solo se asegura de
+    # que las columnas existan (quedan NULL en las reseñas scrapeadas).
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(reviews)")}
+    for col in ("fecha_hora", "respuesta_texto", "respuesta_fecha"):
+        if col not in cols:
+            cur.execute(f"ALTER TABLE reviews ADD COLUMN {col} TEXT")
+
     for r in reviews:
         cur.execute("""
             INSERT INTO reviews (

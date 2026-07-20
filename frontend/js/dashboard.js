@@ -184,6 +184,21 @@ async function loadTimeline() {
   renderTimelineChart(timeline);
 }
 
+let horarioVisible = false;
+
+async function loadHorario() {
+  if (!horarioVisible) return;
+  const params = currentQueryParams();
+  const data = await fetchJSON(`${API_BASE}/timeline-horas?${params.toString()}`);
+  renderHoraChart(data.por_hora);
+  renderDiaSemanaChart(data.por_dia_semana);
+  const hintEl = document.getElementById("horario-hint");
+  hintEl.hidden = false;
+  hintEl.textContent = data.con_hora_exacta > 0
+    ? `Basado en ${data.con_hora_exacta.toLocaleString("es-ES")} reseñas con hora exacta (las importadas desde Google Takeout; las scrapeadas de Maps no la traen).`
+    : "Ninguna reseña en este filtro tiene hora exacta todavía (hace falta importar un export de Google Takeout).";
+}
+
 async function loadKeywords() {
   const params = currentQueryParams({ limit: 20 });
   const { keywords } = await fetchJSON(`${API_BASE}/keywords?${params.toString()}`);
@@ -307,6 +322,7 @@ async function refreshAll() {
     ["stats", loadStats()],
     ["rating-progress", loadRatingProgress()],
     ["timeline", loadTimeline()],
+    ["horario", loadHorario()],
     ["keywords", loadKeywords()],
     ["staff", loadStaffMentions()],
     ["reviews", loadReviews()],
@@ -445,6 +461,14 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   wireFilters(() => refreshAll(), () => loadReviews());
+
+  document.getElementById("btn-toggle-horario").addEventListener("click", (e) => {
+    horarioVisible = !horarioVisible;
+    document.getElementById("horario-charts").hidden = !horarioVisible;
+    document.getElementById("horario-hint").hidden = !horarioVisible;
+    e.target.textContent = horarioVisible ? "Ocultar" : "Mostrar";
+    if (horarioVisible) loadHorario().catch((err) => console.error("Fallo cargando horario:", err));
+  });
   document.getElementById("btn-refresh").addEventListener("click", startScrapeUpdate);
   document.getElementById("btn-export-csv").addEventListener("click", exportExcel);
   document.getElementById("input-transactions-month").value = new Date().toISOString().slice(0, 7);

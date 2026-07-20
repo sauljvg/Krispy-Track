@@ -15,7 +15,8 @@ import os
 import re
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -42,6 +43,28 @@ LOCATION_TO_STORE = {
 }
 
 STAR_MAP = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
+
+MADRID_TZ = ZoneInfo("Europe/Madrid")
+
+
+def parse_google_timestamp(ts):
+    """Convierte un timestamp de Google ('...Z', UTC, con o sin fracción de
+    segundo) a un datetime naive en hora de Madrid — así el desglose por
+    hora del día refleja la hora real en la que la gente escribe, no UTC."""
+    if not ts:
+        return None
+    ts = ts.rstrip("Z")
+    if "." in ts:
+        base, frac = ts.split(".", 1)
+        ts = f"{base}.{(frac + '000000')[:6]}"
+        fmt = "%Y-%m-%dT%H:%M:%S.%f"
+    else:
+        fmt = "%Y-%m-%dT%H:%M:%S"
+    try:
+        dt_utc = datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return dt_utc.astimezone(MADRID_TZ).replace(tzinfo=None)
 
 
 def longpath(p):
@@ -111,13 +134,12 @@ def process_takeout_review(raw, tienda, current_date):
     rating = STAR_MAP.get(raw.get("starRating"))
     texto = strip_translation(raw.get("comment", ""))
 
-    create_time = raw.get("createTime")
-    fecha_dt = None
-    if create_time:
-        try:
-            fecha_dt = datetime.strptime(create_time[:19], "%Y-%m-%dT%H:%M:%S")
-        except ValueError:
-            fecha_dt = None
+    fecha_dt = parse_google_timestamp(raw.get("createTime"))
+
+    reply = raw.get("reviewReply") or {}
+    respuesta_texto = strip_translation(reply.get("comment", "")) or None
+    respuesta_fecha_dt = parse_google_timestamp(reply.get("updateTime"))
+    respuesta_fecha = respuesta_fecha_dt.strftime("%Y-%m-%d %H:%M:%S") if respuesta_fecha_dt else None
 
     sentiment, sentiment_score = calcular_sentimiento(texto, rating)
     es_reciente = bool(fecha_dt and (current_date - fecha_dt).days <= 120)
@@ -128,6 +150,7 @@ def process_takeout_review(raw, tienda, current_date):
         "autor": (raw.get("reviewer") or {}).get("displayName", "Usuario de Google").strip(),
         "fecha": fecha_relativa_desde(fecha_dt, current_date) if fecha_dt else "",
         "fecha_datetime": fecha_dt.strftime("%Y-%m-%d") if fecha_dt else None,
+        "fecha_hora": fecha_dt.strftime("%Y-%m-%d %H:%M:%S") if fecha_dt else None,
         "fecha_categoria": fecha_categoria(fecha_dt),
         "calificación": f"{rating}★" if rating else "No especificada",
         "calificacion_num": rating,
@@ -135,6 +158,8 @@ def process_takeout_review(raw, tienda, current_date):
         "es_abril_o_reciente": es_reciente,
         "sentiment": sentiment,
         "sentiment_score": sentiment_score,
+        "respuesta_texto": respuesta_texto,
+        "respuesta_fecha": respuesta_fecha,
     }
 
 
@@ -160,31 +185,45 @@ def save_to_sqlite(reviews):
             autor TEXT,
             fecha TEXT,
             fecha_datetime TEXT,
+            fecha_hora TEXT,
             fecha_categoria TEXT,
             calificacion TEXT,
             calificacion_num INTEGER,
             texto TEXT,
             es_reciente INTEGER,
             sentiment TEXT,
-            sentiment_score REAL
+            sentiment_score REAL,
+            respuesta_texto TEXT,
+            respuesta_fecha TEXT
         )
     """)
+    # Migración idempotente para bases de datos creadas antes de añadir hora
+    # exacta y respuesta del negocio (solo disponibles vía Takeout, no scraping).
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
+    for col in ("fecha_hora", "respuesta_texto", "respuesta_fecha"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE reviews ADD COLUMN {col} TEXT")
+
     for r in reviews:
         conn.execute("""
             INSERT INTO reviews (
-                review_id, tienda, autor, fecha, fecha_datetime, fecha_categoria,
-                calificacion, calificacion_num, texto, es_reciente, sentiment, sentiment_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                review_id, tienda, autor, fecha, fecha_datetime, fecha_hora, fecha_categoria,
+                calificacion, calificacion_num, texto, es_reciente, sentiment, sentiment_score,
+                respuesta_texto, respuesta_fecha
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(review_id) DO UPDATE SET
                 tienda=excluded.tienda, autor=excluded.autor, fecha=excluded.fecha,
-                fecha_datetime=excluded.fecha_datetime, fecha_categoria=excluded.fecha_categoria,
+                fecha_datetime=excluded.fecha_datetime, fecha_hora=excluded.fecha_hora,
+                fecha_categoria=excluded.fecha_categoria,
                 calificacion=excluded.calificacion, calificacion_num=excluded.calificacion_num,
                 texto=excluded.texto, es_reciente=excluded.es_reciente, sentiment=excluded.sentiment,
-                sentiment_score=excluded.sentiment_score
+                sentiment_score=excluded.sentiment_score, respuesta_texto=excluded.respuesta_texto,
+                respuesta_fecha=excluded.respuesta_fecha
         """, (
-            r["review_id"], r["tienda"], r["autor"], r["fecha"], r["fecha_datetime"], r["fecha_categoria"],
-            r["calificación"], r["calificacion_num"], r["texto"], int(r["es_abril_o_reciente"]),
-            r["sentiment"], r["sentiment_score"],
+            r["review_id"], r["tienda"], r["autor"], r["fecha"], r["fecha_datetime"], r["fecha_hora"],
+            r["fecha_categoria"], r["calificación"], r["calificacion_num"], r["texto"],
+            int(r["es_abril_o_reciente"]), r["sentiment"], r["sentiment_score"],
+            r["respuesta_texto"], r["respuesta_fecha"],
         ))
     conn.commit()
     conn.close()

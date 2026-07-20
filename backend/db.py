@@ -60,5 +60,21 @@ def _ensure_store_meta_table():
     conn.close()
 
 
+def _ensure_reviews_columns():
+    """fecha_hora/respuesta_texto/respuesta_fecha se añadieron después de
+    crear la tabla reviews (la crea el scraper) — si ya existe pero le
+    faltan estas columnas, se añaden aquí para que las consultas del
+    backend no fallen aunque no se haya vuelto a correr el scraper."""
+    conn = get_connection()
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
+    if cols:  # si está vacío, la tabla reviews aún no existe
+        for col in ("fecha_hora", "respuesta_texto", "respuesta_fecha"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE reviews ADD COLUMN {col} TEXT")
+        conn.commit()
+    conn.close()
+
+
 _ensure_transactions_table()
 _ensure_store_meta_table()
+_ensure_reviews_columns()

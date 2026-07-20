@@ -297,6 +297,49 @@ def get_rating_progress(where="", params=None):
     }
 
 
+DIAS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+
+def get_hourly_distribution(where, params):
+    """Reseñas agrupadas por hora del día (0-23, hora de Madrid) y por día
+    de la semana, usando fecha_hora. Ese campo solo lo rellena la
+    importación de Google Takeout (el scraping de Maps no trae hora exacta),
+    así que esto puede cubrir menos reseñas que el total general — se
+    informa cuántas sí tienen hora exacta para que quede claro."""
+    conn = get_connection()
+    clause = where + (" AND" if where else " WHERE") + " fecha_hora IS NOT NULL"
+
+    por_hora_rows = conn.execute(f"""
+        SELECT CAST(strftime('%H', fecha_hora) AS INTEGER) AS hora, COUNT(*) AS n
+        FROM reviews {clause}
+        GROUP BY hora
+    """, params).fetchall()
+    por_hora_map = {row["hora"]: row["n"] for row in por_hora_rows}
+    por_hora = [{"hora": h, "cantidad": por_hora_map.get(h, 0)} for h in range(24)]
+
+    # strftime('%w', ...) en SQLite: 0=domingo..6=sábado. Se reordena para
+    # que la semana empiece en lunes, como es habitual en España.
+    por_dia_rows = conn.execute(f"""
+        SELECT CAST(strftime('%w', fecha_hora) AS INTEGER) AS dow, COUNT(*) AS n
+        FROM reviews {clause}
+        GROUP BY dow
+    """, params).fetchall()
+    por_dia_map = {row["dow"]: row["n"] for row in por_dia_rows}
+    orden_lunes_primero = [1, 2, 3, 4, 5, 6, 0]
+    por_dia_semana = [
+        {"dia": DIAS_ES[i], "cantidad": por_dia_map.get(dow, 0)}
+        for i, dow in enumerate(orden_lunes_primero)
+    ]
+
+    con_hora_exacta = sum(por_hora_map.values())
+    conn.close()
+    return {
+        "por_hora": por_hora,
+        "por_dia_semana": por_dia_semana,
+        "con_hora_exacta": con_hora_exacta,
+    }
+
+
 def get_store_total_google(tienda):
     """Total de reseñas que Google anunció la última vez que se scrapeó esta
     tienda (o None si nunca se guardó). Sirve para el check de "100%

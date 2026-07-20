@@ -183,6 +183,20 @@ def stats(
     return result
 
 
+@router.get("/timeline-horas")
+def timeline_horas(
+    rating: int | None = None,
+    sentiment: str | None = Query(default=None, pattern="^(positivo|neutral|negativo)$"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    staff: str | None = None,
+    tienda: str | None = None,
+):
+    where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+    return analytics.get_hourly_distribution(where, params)
+
+
 @router.get("/rating-progress")
 def rating_progress(
     rating: int | None = None,

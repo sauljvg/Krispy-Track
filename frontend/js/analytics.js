@@ -1,5 +1,7 @@
 let timelineChart = null;
 let distributionChart = null;
+let horaChart = null;
+let diaSemanaChart = null;
 
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -62,6 +64,58 @@ function renderDistributionChart(distribucion) {
       scales: {
         x: { grid: { display: false }, ticks: { color: cssVar("--text-muted") } },
         y: { beginAtZero: true, grid: { color: cssVar("--gridline") }, ticks: { color: cssVar("--text-muted") } },
+      },
+    },
+  });
+}
+
+function renderHoraChart(porHora) {
+  const ctx = document.getElementById("chart-hora");
+  if (horaChart) horaChart.destroy();
+  horaChart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: porHora.map((h) => `${h.hora}h`),
+      datasets: [{
+        label: "Reseñas",
+        data: porHora.map((h) => h.cantidad),
+        backgroundColor: cssVar("--series-blue"),
+        borderRadius: 4,
+        maxBarThickness: 22,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: cssVar("--text-muted") } },
+        y: { beginAtZero: true, grid: { color: cssVar("--gridline") }, ticks: { color: cssVar("--text-muted"), precision: 0 } },
+      },
+    },
+  });
+}
+
+function renderDiaSemanaChart(porDia) {
+  const ctx = document.getElementById("chart-dia-semana");
+  if (diaSemanaChart) diaSemanaChart.destroy();
+  diaSemanaChart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: porDia.map((d) => d.dia),
+      datasets: [{
+        label: "Reseñas",
+        data: porDia.map((d) => d.cantidad),
+        backgroundColor: cssVar("--series-blue"),
+        borderRadius: 4,
+        maxBarThickness: 46,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: cssVar("--text-muted") } },
+        y: { beginAtZero: true, grid: { color: cssVar("--gridline") }, ticks: { color: cssVar("--text-muted"), precision: 0 } },
       },
     },
   });
