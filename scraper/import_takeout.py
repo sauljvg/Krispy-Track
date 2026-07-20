@@ -21,10 +21,12 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Cuando se ejecuta como script, Python ya añade la carpeta scraper/ a
+# sys.path automáticamente; al importar este módulo desde otro sitio (p.ej.
+# el backend) hace falta añadirla a mano para que "import config" resuelva.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import calcular_sentimiento, fecha_categoria  # noqa: E402
 import config  # noqa: E402
-
-CURRENT_DATE = datetime.now()
 
 # IDs internos de ubicación de Google Business Profile -> nombre de tienda tal
 # como aparece en stores.py. Se identificaron cruzando el "storeCode" de cada
@@ -66,8 +68,8 @@ def strip_translation(texto):
     return texto.strip()
 
 
-def fecha_relativa_desde(fecha_dt):
-    dias = (CURRENT_DATE - fecha_dt).days
+def fecha_relativa_desde(fecha_dt, current_date):
+    dias = (current_date - fecha_dt).days
     if dias <= 0:
         return "Hoy"
     if dias == 1:
@@ -104,7 +106,7 @@ def load_location_reviews(location_dir):
     return list(all_reviews.values())
 
 
-def process_takeout_review(raw, tienda):
+def process_takeout_review(raw, tienda, current_date):
     review_id = raw["name"].rsplit("/", 1)[-1]
     rating = STAR_MAP.get(raw.get("starRating"))
     texto = strip_translation(raw.get("comment", ""))
@@ -118,13 +120,13 @@ def process_takeout_review(raw, tienda):
             fecha_dt = None
 
     sentiment, sentiment_score = calcular_sentimiento(texto, rating)
-    es_reciente = bool(fecha_dt and (CURRENT_DATE - fecha_dt).days <= 120)
+    es_reciente = bool(fecha_dt and (current_date - fecha_dt).days <= 120)
 
     return {
         "review_id": review_id,
         "tienda": tienda,
         "autor": (raw.get("reviewer") or {}).get("displayName", "Usuario de Google").strip(),
-        "fecha": fecha_relativa_desde(fecha_dt) if fecha_dt else "",
+        "fecha": fecha_relativa_desde(fecha_dt, current_date) if fecha_dt else "",
         "fecha_datetime": fecha_dt.strftime("%Y-%m-%d") if fecha_dt else None,
         "fecha_categoria": fecha_categoria(fecha_dt),
         "calificación": f"{rating}★" if rating else "No especificada",
@@ -213,24 +215,24 @@ def find_account_dir(takeout_root):
     return matches[0]
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Uso: python import_takeout.py <carpeta_takeout_extraida>")
-        sys.exit(1)
-
-    account_dir = find_account_dir(sys.argv[1])
-    print(f"Cuenta de Takeout: {account_dir}\n")
+def run_import(takeout_root, log=lambda msg: None):
+    """Corre la importación completa y devuelve el reporte (lista de dicts,
+    uno por tienda). `log` recibe líneas de progreso opcionales — el CLI las
+    imprime, el endpoint del backend las puede ignorar o guardar."""
+    account_dir = find_account_dir(takeout_root)
+    log(f"Cuenta de Takeout: {account_dir}")
+    current_date = datetime.now()
 
     report = []
     for loc_dir_name, tienda in LOCATION_TO_STORE.items():
         loc_path = os.path.join(account_dir, loc_dir_name)
         if not os.path.isdir(loc_path):
-            print(f"! {tienda}: no se encontró la carpeta {loc_dir_name}, se omite")
+            log(f"! {tienda}: no se encontró la carpeta {loc_dir_name}, se omite")
             continue
 
         raw_reviews = load_location_reviews(loc_path)
         existing_ids = get_existing_ids(tienda)
-        processed = [process_takeout_review(r, tienda) for r in raw_reviews]
+        processed = [process_takeout_review(r, tienda, current_date) for r in raw_reviews]
 
         nuevas = [p for p in processed if p["review_id"] not in existing_ids]
         actualizadas = [p for p in processed if p["review_id"] in existing_ids]
@@ -251,9 +253,19 @@ def main():
             "pct": pct,
         })
 
-        print(f"{tienda}: {len(processed)} en Takeout | {len(nuevas)} nuevas | "
-              f"{len(actualizadas)} ya existían (actualizadas) | "
-              f"total ahora: {total_ahora}" + (f"/{total_google} ({pct})" if total_google else ""))
+        log(f"{tienda}: {len(processed)} en Takeout | {len(nuevas)} nuevas | "
+            f"{len(actualizadas)} ya existían (actualizadas) | "
+            f"total ahora: {total_ahora}" + (f"/{total_google} ({pct})" if total_google else ""))
+
+    return report
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Uso: python import_takeout.py <carpeta_takeout_extraida>")
+        sys.exit(1)
+
+    report = run_import(sys.argv[1], log=print)
 
     print("\n" + "=" * 70)
     print("REPORTE FINAL — Import de Google Takeout")

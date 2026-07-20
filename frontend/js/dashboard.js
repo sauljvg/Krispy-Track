@@ -101,6 +101,28 @@ async function uploadTransaccionesFile(file) {
   await loadStoreRanking();
 }
 
+async function uploadTakeoutZip(file) {
+  const btn = document.getElementById("btn-import-takeout-label");
+  if (btn) btn.textContent = "⏳ Importando…";
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`${API_BASE}/import/takeout`, { method: "POST", body: formData });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(`No se pudo importar el Takeout: ${body.detail || res.statusText}`);
+      return;
+    }
+    const lineas = body.tiendas
+      .map((t) => `${t.tienda}: +${t.nuevas} nuevas (total ${t.total_ahora}${t.total_google ? `/${t.total_google}` : ""})`)
+      .join("\n");
+    alert(`Importación completa — ${body.total_nuevas} reseñas nuevas en total.\n\n${lineas}`);
+    await refreshAll();
+  } finally {
+    if (btn) btn.textContent = "📥 Importar Takeout";
+  }
+}
+
 async function loadStats() {
   const params = currentQueryParams();
   const stats = await fetchJSON(`${API_BASE}/stats?${params.toString()}`);
@@ -458,6 +480,16 @@ document.addEventListener("DOMContentLoaded", () => {
     const file = e.target.files[0];
     if (!file) return;
     uploadTransaccionesFile(file).catch((err) => console.error("Fallo subiendo Excel:", err));
+    e.target.value = "";
+  });
+
+  document.getElementById("input-import-takeout").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    uploadTakeoutZip(file).catch((err) => {
+      console.error("Fallo importando Takeout:", err);
+      alert("Fallo importando el Takeout — revisa la consola del navegador.");
+    });
     e.target.value = "";
   });
 

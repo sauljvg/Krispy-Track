@@ -1,3 +1,9 @@
+import os
+import shutil
+import sys
+import tempfile
+import zipfile
+
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
@@ -6,6 +12,9 @@ import analytics
 import scrape_jobs
 from db import dict_rows, get_connection
 from utils import paginate, read_transactions_xlsx, rows_to_csv, rows_to_xlsx
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scraper")))
+import import_takeout as import_takeout_module  # noqa: E402
 
 router = APIRouter()
 
@@ -308,3 +317,40 @@ def upload_transactions(file: UploadFile = File(...), mes: str | None = Query(de
         raise HTTPException(400, "No se encontraron filas válidas (columnas esperadas: tienda, mes, transacciones)")
     analytics.bulk_set_store_transactions(rows)
     return {"ok": True, "actualizadas": len(rows)}
+
+
+@router.post("/import/takeout")
+def import_takeout(file: UploadFile = File(...)):
+    """Sube el .zip de un export de Google Takeout ("Perfil de Empresa en
+    Google") y lo importa: lee todas las reseñas oficiales de cada tienda y
+    solo inserta las que no teníamos (por review_id), sin duplicar."""
+    if not file.filename.lower().endswith(".zip"):
+        raise HTTPException(400, "Sube el archivo .zip que descarga Google Takeout, sin extraer.")
+
+    tmp_dir = tempfile.mkdtemp(prefix="kt_import_")
+    try:
+        zip_path = os.path.join(tmp_dir, "upload.zip")
+        with open(zip_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        extract_dir = os.path.join(tmp_dir, "x")
+        # Los nombres de archivo de Takeout (el ID completo de cada reseña)
+        # son tan largos que, combinados con la ruta del directorio temporal,
+        # superan el límite de 260 caracteres de Windows. El prefijo \\?\
+        # hace que Windows use la API de rutas largas sin ese límite.
+        extract_dir_longpath = "\\\\?\\" + os.path.abspath(extract_dir)
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(extract_dir_longpath)
+        except zipfile.BadZipFile:
+            raise HTTPException(400, "El archivo no es un .zip válido.")
+
+        try:
+            report = import_takeout_module.run_import(extract_dir)
+        except SystemExit as e:
+            raise HTTPException(400, str(e))
+
+        total_nuevas = sum(r["nuevas"] for r in report)
+        return {"ok": True, "total_nuevas": total_nuevas, "tiendas": report}
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
