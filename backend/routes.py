@@ -93,8 +93,9 @@ def list_reviews(
 
     cur.execute(
         f"""
-        SELECT review_id, tienda, autor, fecha, fecha_datetime, fecha_categoria,
-               calificacion, calificacion_num, texto, es_reciente, sentiment, sentiment_score
+        SELECT review_id, tienda, autor, fecha, fecha_datetime, fecha_hora, fecha_categoria,
+               calificacion, calificacion_num, texto, es_reciente, sentiment, sentiment_score,
+               respuesta_texto, respuesta_fecha
         FROM reviews {where}
         ORDER BY {order_by}
         LIMIT ? OFFSET ?

@@ -262,15 +262,31 @@ function clearStaffFilter() {
   return refreshAll();
 }
 
+const MESES_CORTOS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+
+function formatFechaExacta(fechaDatetime) {
+  if (!fechaDatetime) return "";
+  const [y, m, d] = fechaDatetime.split("-");
+  return `${parseInt(d, 10)} ${MESES_CORTOS[parseInt(m, 10) - 1]} ${y}`;
+}
+
+function formatHoraExacta(fechaHora) {
+  if (!fechaHora) return "";
+  const hora = fechaHora.split(" ")[1];
+  return hora ? hora.slice(0, 5) : "";
+}
+
 function reviewCardHTML(r) {
   const stars = r.calificacion_num ? "★".repeat(r.calificacion_num) + "☆".repeat(5 - r.calificacion_num) : "—";
+  const fechaExacta = formatFechaExacta(r.fecha_datetime) || escapeHTML(r.fecha_categoria || "");
+  const horaExacta = formatHoraExacta(r.fecha_hora);
   return `
     <div class="review-item">
       <div class="review-top">
         <span class="review-author">${escapeHTML(r.autor || "Anónimo")}</span>
         <span class="review-meta">
           <span class="review-stars">${stars}</span>
-          <span>${escapeHTML(r.fecha_categoria || "")}</span>
+          <span${horaExacta ? ` title="${horaExacta} (hora de Madrid)"` : ""}>${fechaExacta}</span>
           <span class="badge badge-${r.sentiment}">${r.sentiment}</span>
         </span>
       </div>
