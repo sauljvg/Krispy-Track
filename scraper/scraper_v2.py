@@ -9,6 +9,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -182,10 +183,52 @@ if _orders_arg:
     SORT_OPTIONS_TO_TRY = [o.replace("_", " ") for o in _orders_arg.split("=", 1)[1].split(",") if o]
 
 
-def build_driver():
+# Perfil de Chrome persistente (cookies, sesión de Google si inicias sesión
+# con `python scraper_v2.py --login`) — sin esto, cada scrape abría un Chrome
+# "en blanco" que olvidaba todo al cerrarse.
+#
+# Solo `--login` escribe directamente en este perfil "maestro". Los scrapes
+# normales usan una COPIA propia por tienda (ver _prepare_work_profile):
+# Chrome bloquea el directorio de perfil mientras está en uso, así que si dos
+# tiendas (o un --login abierto) compartieran literalmente el mismo
+# --user-data-dir, la segunda en llegar revienta con "session not created:
+# failed to write first run file". Con una copia por tienda, cada una tiene
+# su propio directorio y pueden correr a la vez sin pisarse, heredando igual
+# la sesión iniciada en el perfil maestro.
+CHROME_PROFILE_MASTER_DIR = os.path.join(os.path.dirname(__file__), "chrome_profile")
+CHROME_PROFILE_WORK_DIR = os.path.join(os.path.dirname(__file__), "chrome_profile_work")
+
+
+# Solo hace falta copiar lo que guarda la sesión (cookies, Local State con la
+# clave para descifrarlas); las cachés de Chrome (Service Worker, GPU, shaders,
+# etc.) son pesadas, innecesarias, y sus rutas internas son tan profundas que
+# sumadas a esta carpeta de OneDrive superan el límite de ruta de Windows.
+_PROFILE_COPY_IGNORE = shutil.ignore_patterns(
+    "Service Worker", "*Cache*", "GrShaderCache", "ShaderCache", "Crashpad",
+    "component_crx_cache", "blob_storage", "Session Storage", "Local Storage",
+    "Extension State", "Sessions",
+)
+
+
+def _prepare_work_profile(store_key):
+    work_dir = os.path.join(CHROME_PROFILE_WORK_DIR, store_key)
+    if os.path.exists(CHROME_PROFILE_MASTER_DIR):
+        if os.path.exists(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+        try:
+            shutil.copytree(CHROME_PROFILE_MASTER_DIR, work_dir, ignore=_PROFILE_COPY_IGNORE)
+        except OSError as e:
+            print(f"Aviso: no se pudo copiar el perfil de Chrome ({e}), se sigue sin sesión iniciada.", flush=True)
+    return work_dir
+
+
+def build_driver(for_login=False):
     options = webdriver.ChromeOptions()
     options.add_argument("--disable-extensions")
     options.add_argument("--lang=es-ES")
+    profile_dir = CHROME_PROFILE_MASTER_DIR if for_login else _prepare_work_profile(STORE_KEY)
+    options.add_argument(f"--user-data-dir={profile_dir}")
+    options.add_argument("--profile-directory=Default")
     # Google reduce/corta el listado de reseñas cuando detecta una sesión
     # automatizada (navigator.webdriver=true). Estas opciones son la mitigación
     # estándar de Selenium para que la sesión se comporte como un Chrome normal.
@@ -318,7 +361,14 @@ def switch_sort(driver, label_text, attempts=6):
     """
     for attempt in range(attempts):
         try:
-            btn = driver.find_element(By.XPATH, "//button[contains(@aria-label, 'rdenar')]")
+            # find_element (singular) coge el primero del DOM aunque no sea
+            # visible; tras muchas horas de sesión puede haber más de un
+            # candidato y el visible no ser el primero, así que filtramos.
+            candidates = driver.find_elements(By.XPATH, "//button[contains(@aria-label, 'rdenar')]")
+            btn = next((b for b in candidates if b.is_displayed()), None)
+            if btn is None:
+                raise RuntimeError(f"botón 'Ordenar' no visible ({len(candidates)} candidatos en el DOM)")
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
             btn.click()
             try:
                 WebDriverWait(driver, 4).until(
@@ -343,11 +393,15 @@ def load_fresh_page(driver):
     """Carga la página desde cero y espera a que aparezcan las primeras
     reseñas. Se usa antes de cada cambio de orden para partir de un DOM
     limpio, en vez de intentar pivotar el orden sobre un listado ya scrolleado
-    cientos de veces (donde el menú de orden puede dejar de responder)."""
+    cientos de veces (donde el menú de orden puede dejar de responder).
+
+    Devuelve True solo si confirmó el panel real de reseñas — si se queda en
+    la pestaña de Overview (destacadas), el botón "Ordenar" existe en el DOM
+    pero no es visible, y cambiar de orden falla siempre en ese caso."""
     driver.get(STORE_URL)
     time.sleep(3)
     dismiss_cookie_consent(driver)
-    ensure_reviews_panel_loaded(driver)
+    return ensure_reviews_panel_loaded(driver)
 
 
 def get_existing_review_ids(tienda):
@@ -539,8 +593,21 @@ def scrape_all_reviews():
             if total_hint and unique_so_far >= total_hint:
                 break
             print(f"\nRecargando página limpia para probar orden: {label}...", flush=True)
-            load_fresh_page(driver)
-            if not switch_sort(driver, label):
+            # Tras una pasada de scroll muy larga, la primera recarga a veces
+            # no basta (el driver/la página quedan en un estado raro) — se
+            # reintenta una vez más con una recarga completamente nueva antes
+            # de rendirse con este orden.
+            switched = False
+            for sort_retry in range(4):
+                panel_ok = load_fresh_page(driver)
+                if not panel_ok:
+                    print(f"Recarga {sort_retry + 1}/4: no se confirmó el panel de reseñas (se quedó en Overview), reintentando recarga...", flush=True)
+                    continue
+                if switch_sort(driver, label):
+                    switched = True
+                    break
+                print(f"Reintento de recarga+orden para '{label}' (intento {sort_retry + 1}/4) falló.", flush=True)
+            if not switched:
                 print(f"No se pudo cambiar el orden a '{label}', se omite este intento.", flush=True)
                 continue
             if wait_for_any_reviews(driver) == 0:
@@ -695,7 +762,28 @@ def save_outputs(reviews):
         print(f"Total combinado (todas las tiendas en la BD): {len(all_reviews)}")
 
 
+def run_login_setup():
+    """Abre un Chrome real (mismo perfil persistente que usan los scrapes) en
+    la página de login de Google y espera a que el usuario inicie sesión a
+    mano — nunca se automatiza el login en sí, solo se deja el navegador listo
+    para que la persona lo haga. Tras cerrar, la sesión queda guardada en
+    CHROME_PROFILE_DIR para los scrapes siguientes."""
+    print("Abriendo Chrome para iniciar sesión manualmente...")
+    driver = build_driver(for_login=True)
+    try:
+        driver.get("https://accounts.google.com/")
+        print("\nInicia sesión en la ventana de Chrome que se acaba de abrir.")
+        input("Cuando hayas terminado (o si prefieres seguir sin iniciar sesión), pulsa Enter aquí para continuar... ")
+    finally:
+        driver.quit()
+        print("Chrome cerrado. La sesión (si iniciaste) queda guardada para los próximos scrapes.")
+
+
 if __name__ == "__main__":
+    if "--login" in sys.argv:
+        run_login_setup()
+        sys.exit(0)
+
     print("="*60)
     print(f"EXTRACTOR V2 - KRISPY KREME {STORE_NAME.upper()}")
     print("="*60)

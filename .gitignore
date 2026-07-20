@@ -4,3 +4,5 @@ __pycache__/
 scraper/status/*.lock
 krispy_kreme_todas_resenas.json
 krispy_kreme_todas_resenas.csv
+scraper/chrome_profile/
+scraper/chrome_profile_work/
