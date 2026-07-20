@@ -173,9 +173,13 @@ def stats(
 ):
     where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
     result = analytics.get_stats(where, params)
-    total_google = analytics.get_store_total_google(tienda) if tienda else None
-    result["total_google"] = total_google
-    result["completo"] = bool(total_google and result["total"] >= total_google)
+    if tienda:
+        total_google = analytics.get_store_total_google(tienda)
+        result["total_google"] = total_google
+        result["completo"] = bool(total_google and result["total"] >= total_google)
+    else:
+        result["total_google"] = None
+        result["completo"] = analytics.get_all_stores_completeness()
     return result
 
 

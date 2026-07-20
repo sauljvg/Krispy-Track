@@ -135,7 +135,9 @@ async function loadStats() {
   const checkEl = document.getElementById("stat-total-check");
   if (stats.completo) {
     checkEl.hidden = false;
-    checkEl.title = `100% capturado (${stats.total.toLocaleString("es-ES")} de ${stats.total_google.toLocaleString("es-ES")} según Google)`;
+    checkEl.title = stats.total_google
+      ? `100% capturado (${stats.total.toLocaleString("es-ES")} de ${stats.total_google.toLocaleString("es-ES")} según Google)`
+      : "100% capturado en todas las tiendas";
   } else {
     checkEl.hidden = true;
   }

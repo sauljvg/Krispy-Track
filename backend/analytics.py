@@ -308,6 +308,22 @@ def get_store_total_google(tienda):
     return row["total_google"] if row and row["total_google"] else None
 
 
+def get_all_stores_completeness():
+    """Para la vista "Todas" (sin filtro de tienda): True solo si CADA
+    tienda con reseñas tiene su total_google registrado y ya lo alcanzó."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT r.tienda AS tienda, COUNT(*) AS total, sm.total_google AS total_google
+        FROM reviews r
+        LEFT JOIN store_meta sm ON sm.tienda = r.tienda
+        GROUP BY r.tienda
+    """).fetchall()
+    conn.close()
+    if not rows:
+        return False
+    return all(row["total_google"] and row["total"] >= row["total_google"] for row in rows)
+
+
 def get_store_stats(order_by="total", mes=None):
     """Reseñas, promedio y (si se han cargado) transacciones + tasa por
     tienda — para el selector de tienda y el ranking comparativo entre
