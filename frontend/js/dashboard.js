@@ -117,6 +117,8 @@ async function uploadTakeoutZip(file) {
       .map((t) => `${t.tienda}: +${t.nuevas} nuevas (total ${t.total_ahora}${t.total_google ? `/${t.total_google}` : ""})`)
       .join("\n");
     alert(`Importación completa — ${body.total_nuevas} reseñas nuevas en total.\n\n${lineas}`);
+    await loadStores();
+    await loadStoreRanking();
     await refreshAll();
   } finally {
     if (btn) btn.textContent = "📥 Importar Takeout";
