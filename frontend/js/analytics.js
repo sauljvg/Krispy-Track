@@ -86,6 +86,13 @@ function renderHoraChart(porHora) {
     },
     options: {
       responsive: true,
+      onClick: (evt, elements) => {
+        if (!elements.length) return;
+        selectHoraFiltro(porHora[elements[0].index].hora);
+      },
+      onHover: (evt, elements) => {
+        evt.native.target.style.cursor = elements.length ? "pointer" : "default";
+      },
       plugins: { legend: { display: false } },
       scales: {
         x: { grid: { display: false }, ticks: { color: cssVar("--text-muted") } },
@@ -112,6 +119,13 @@ function renderDiaSemanaChart(porDia) {
     },
     options: {
       responsive: true,
+      onClick: (evt, elements) => {
+        if (!elements.length) return;
+        selectDiaSemanaFiltro(porDia[elements[0].index].dia);
+      },
+      onHover: (evt, elements) => {
+        evt.native.target.style.cursor = elements.length ? "pointer" : "default";
+      },
       plugins: { legend: { display: false } },
       scales: {
         x: { grid: { display: false }, ticks: { color: cssVar("--text-muted") } },

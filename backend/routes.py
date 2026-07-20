@@ -63,6 +63,36 @@ def build_filters(rating, sentiment, date_from, date_to, q, staff=None, tienda=N
     return where, params
 
 
+# Mismo orden que analytics.DIAS_ES (lunes primero) -> valor que devuelve
+# strftime('%w', ...) en SQLite (0=domingo..6=sábado).
+DIA_ES_A_SQLITE = {
+    "Lunes": 1, "Martes": 2, "Miércoles": 3, "Jueves": 4,
+    "Viernes": 5, "Sábado": 6, "Domingo": 0,
+}
+
+
+def apply_hora_dia(where, params, hora, dia_semana):
+    """Añade el filtro de hora del día / día de la semana (clic en el
+    gráfico de "Horario de reseñas") sobre lo que ya calculó build_filters.
+    Solo afecta a reseñas con fecha_hora (las importadas de Takeout)."""
+    clauses = []
+    extra_params = []
+    if hora is not None:
+        clauses.append("CAST(strftime('%H', fecha_hora) AS INTEGER) = ?")
+        extra_params.append(hora)
+    if dia_semana:
+        dow = DIA_ES_A_SQLITE.get(dia_semana)
+        if dow is None:
+            raise HTTPException(400, f"Día de la semana no reconocido: '{dia_semana}'")
+        clauses.append("CAST(strftime('%w', fecha_hora) AS INTEGER) = ?")
+        extra_params.append(dow)
+    if not clauses:
+        return where, params
+    joined = " AND ".join(clauses)
+    new_where = where + (" AND " if where else " WHERE ") + joined
+    return new_where, params + extra_params
+
+
 @router.get("/reviews")
 def list_reviews(
     page: int = 1,
@@ -74,10 +104,13 @@ def list_reviews(
     q: str | None = None,
     staff: str | None = None,
     tienda: str | None = None,
+    hora: int | None = Query(default=None, ge=0, le=23),
+    dia_semana: str | None = None,
     sort: str = Query(default="recientes", pattern="^(recientes|antiguas|mejor|peor)$"),
 ):
     page, page_size, offset = paginate(page, page_size)
     where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+    where, params = apply_hora_dia(where, params, hora, dia_semana)
 
     order_by = {
         "recientes": "fecha_datetime DESC",
@@ -114,8 +147,9 @@ def list_reviews(
     }
 
 
-def _filtered_rows(rating, sentiment, date_from, date_to, q, staff=None, tienda=None):
+def _filtered_rows(rating, sentiment, date_from, date_to, q, staff=None, tienda=None, hora=None, dia_semana=None):
     where, params = build_filters(rating, sentiment, date_from, date_to, q, staff, tienda)
+    where, params = apply_hora_dia(where, params, hora, dia_semana)
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(f"SELECT * FROM reviews {where} ORDER BY fecha_datetime DESC", params)
@@ -133,8 +167,10 @@ def export_reviews_csv(
     q: str | None = None,
     staff: str | None = None,
     tienda: str | None = None,
+    hora: int | None = Query(default=None, ge=0, le=23),
+    dia_semana: str | None = None,
 ):
-    rows = _filtered_rows(rating, sentiment, date_from, date_to, q, staff, tienda)
+    rows = _filtered_rows(rating, sentiment, date_from, date_to, q, staff, tienda, hora, dia_semana)
     csv_text = rows_to_csv(rows)
     return PlainTextResponse(
         csv_text,
@@ -152,8 +188,10 @@ def export_reviews_xlsx(
     q: str | None = None,
     staff: str | None = None,
     tienda: str | None = None,
+    hora: int | None = Query(default=None, ge=0, le=23),
+    dia_semana: str | None = None,
 ):
-    rows = _filtered_rows(rating, sentiment, date_from, date_to, q, staff, tienda)
+    rows = _filtered_rows(rating, sentiment, date_from, date_to, q, staff, tienda, hora, dia_semana)
     xlsx_bytes = rows_to_xlsx(rows)
     return Response(
         xlsx_bytes,

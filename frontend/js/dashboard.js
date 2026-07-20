@@ -333,6 +333,42 @@ async function loadReviews() {
   const data = await fetchJSON(`${API_BASE}/reviews?${params.toString()}`);
   document.getElementById("reviews-list").innerHTML = data.reviews.map(reviewCardHTML).join("") || "<p>No hay reseñas para estos filtros.</p>";
   renderPagination(data.total, data.total_paginas);
+
+  const activeEl = document.getElementById("horario-active-filter");
+  const hayFiltroHorario = state.hora !== "" || state.diaSemana !== "";
+  activeEl.hidden = !hayFiltroHorario;
+  if (hayFiltroHorario) {
+    document.getElementById("horario-active-label").textContent = state.hora !== ""
+      ? `${state.hora}h`
+      : state.diaSemana;
+  }
+}
+
+function selectHoraFiltro(hora) {
+  const mismaHora = state.hora === hora;
+  state.hora = mismaHora ? "" : hora;
+  state.diaSemana = "";
+  state.page = 1;
+  loadReviews().then(() => {
+    document.getElementById("reviews-list").scrollIntoView({ behavior: "smooth", block: "start" });
+  }).catch((err) => console.error("Fallo filtrando por hora:", err));
+}
+
+function selectDiaSemanaFiltro(dia) {
+  const mismoDia = state.diaSemana === dia;
+  state.diaSemana = mismoDia ? "" : dia;
+  state.hora = "";
+  state.page = 1;
+  loadReviews().then(() => {
+    document.getElementById("reviews-list").scrollIntoView({ behavior: "smooth", block: "start" });
+  }).catch((err) => console.error("Fallo filtrando por día:", err));
+}
+
+function clearHorarioFiltro() {
+  state.hora = "";
+  state.diaSemana = "";
+  state.page = 1;
+  return loadReviews();
 }
 
 async function refreshAll() {
@@ -467,6 +503,8 @@ function clearFilters() {
   state.dateTo = "";
   state.q = "";
   state.staff = "";
+  state.hora = "";
+  state.diaSemana = "";
   state.sort = "recientes";
 
   return refreshAll();
@@ -495,6 +533,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.getElementById("btn-clear-filters").addEventListener("click", clearFilters);
   document.getElementById("btn-clear-staff").addEventListener("click", clearStaffFilter);
+  document.getElementById("btn-clear-horario").addEventListener("click", clearHorarioFiltro);
 
   const onStaffRowClick = (e) => {
     const row = e.target.closest("tr[data-name]");

@@ -12,6 +12,8 @@ const state = {
   dateTo: "",
   q: "",
   staff: "",
+  hora: "",
+  diaSemana: "",
   sort: "recientes",
 };
 
@@ -24,6 +26,8 @@ function currentQueryParams(extra = {}) {
   if (state.dateTo) params.set("date_to", state.dateTo);
   if (state.q) params.set("q", state.q);
   if (state.staff) params.set("staff", state.staff);
+  if (state.hora !== "") params.set("hora", state.hora);
+  if (state.diaSemana) params.set("dia_semana", state.diaSemana);
   Object.entries(extra).forEach(([k, v]) => params.set(k, v));
   return params;
 }
