@@ -3,7 +3,3 @@ uvicorn[standard]
 openpyxl
 python-multipart
 selenium
-fastapi
-openpyxl
-python-multipart
-uvicorn[standard]
