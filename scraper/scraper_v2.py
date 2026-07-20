@@ -12,6 +12,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -592,7 +593,15 @@ def scrape_all_reviews():
         for label in SORT_OPTIONS_TO_TRY:
             if total_hint and unique_so_far >= total_hint:
                 break
-            print(f"\nRecargando página limpia para probar orden: {label}...", flush=True)
+            print(f"\nReiniciando Chrome (proceso nuevo) para probar orden: {label}...", flush=True)
+            # Tras una pasada de scroll muy larga la misma pestaña/proceso de
+            # Chrome queda "fatigado" (mucho DOM acumulado) y las recargas
+            # dejan de cargar el panel real de reseñas. En vez de solo
+            # recargar la página, se cierra el driver y se abre uno
+            # completamente nuevo (mismo perfil, así que las cookies/sesión
+            # se mantienen) antes de cada orden alternativo.
+            driver.quit()
+            driver = build_driver()
             # Tras una pasada de scroll muy larga, la primera recarga a veces
             # no basta (el driver/la página quedan en un estado raro) — se
             # reintenta una vez más con una recarga completamente nueva antes
@@ -779,10 +788,80 @@ def run_login_setup():
         print("Chrome cerrado. La sesión (si iniciaste) queda guardada para los próximos scrapes.")
 
 
+def run_manual_assist():
+    """Abre Chrome con Selenium (para poder capturar los datos con el mismo
+    JS que usa el scroll automático) pero deja que la persona haga scroll a
+    mano en esa misma ventana. Google Maps corta/limita el scroll
+    automatizado pero no el humano (confirmado: el bloqueo desaparece cuando
+    el scroll lo hace una persona), así que este modo combina lo mejor de
+    los dos: captura automática, scroll humano. Un hilo en segundo plano va
+    extrayendo lo que se ha cargado cada pocos segundos mientras el humano
+    scrollea, para no perder nada aunque la sesión se corte."""
+    print("Iniciando Chrome en modo manual asistido...")
+    driver = build_driver()
+    all_raw = []
+    seen_ids = set()
+    stop_event = threading.Event()
+
+    def poll_loop():
+        while not stop_event.is_set():
+            try:
+                driver.execute_script(EXPAND_REVIEWS_JS)
+                raw = driver.execute_script(EXTRACT_REVIEWS_JS, REVIEW_CARD_SELECTOR)
+                nuevas = 0
+                for r in raw:
+                    rid = r.get("review_id")
+                    if rid and rid not in seen_ids:
+                        seen_ids.add(rid)
+                        all_raw.append(r)
+                        nuevas += 1
+                if nuevas:
+                    print(f"[modo manual] +{nuevas} nuevas | únicas capturadas: {len(seen_ids)}", flush=True)
+                    write_status(status="running", mensaje="Capturando scroll manual…", nuevas=len(seen_ids))
+            except Exception as e:
+                print(f"[modo manual] aviso al capturar: {e}", flush=True)
+            stop_event.wait(2.5)
+
+    try:
+        driver.get(STORE_URL)
+        time.sleep(4)
+        dismiss_cookie_consent(driver)
+        if not ensure_reviews_panel_loaded(driver):
+            print("Aviso: no se confirmó la carga completa del panel de reseñas, se continúa igualmente.", flush=True)
+
+        total_hint = get_total_reviews_hint(driver)
+        if total_hint:
+            print(f"Google Maps anuncia ~{total_hint} opiniones en total", flush=True)
+            save_total_google(STORE_NAME, total_hint)
+
+        print("\n" + "=" * 60)
+        print("MODO MANUAL ASISTIDO")
+        print("Haz scroll TÚ MISMO dentro de la ventana de Chrome, sobre el")
+        print("panel de reseñas (a la izquierda). El script va guardando en")
+        print("segundo plano lo que se va cargando cada ~2.5s.")
+        print("Cuando termines de bajar hasta el final (o quieras parar),")
+        print("vuelve a esta terminal y pulsa Enter.")
+        print("=" * 60 + "\n")
+
+        poller = threading.Thread(target=poll_loop, daemon=True)
+        poller.start()
+        input("Pulsa Enter aquí cuando termines de hacer scroll manual... ")
+        stop_event.set()
+        poller.join(timeout=5)
+
+        print(f"\nCapturadas {len(all_raw)} tarjetas de reseña en modo manual.")
+        return all_raw
+    finally:
+        driver.quit()
+        print("Chrome cerrado")
+
+
 if __name__ == "__main__":
     if "--login" in sys.argv:
         run_login_setup()
         sys.exit(0)
+
+    MANUAL_MODE = "--manual" in sys.argv
 
     print("="*60)
     print(f"EXTRACTOR V2 - KRISPY KREME {STORE_NAME.upper()}")
@@ -794,7 +873,7 @@ if __name__ == "__main__":
     try:
         write_status(status="running", mensaje="Iniciando Chrome…", reviews_visibles=0, nuevas=0)
         try:
-            raw = scrape_all_reviews()
+            raw = run_manual_assist() if MANUAL_MODE else scrape_all_reviews()
             reviews = process_reviews(raw)
             save_outputs(reviews)
         except Exception as e:
